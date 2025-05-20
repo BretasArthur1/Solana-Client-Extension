@@ -138,15 +138,13 @@ fn test_failed_transaction() {
 fn test_rollup_channel_tagging() {
     let rpc_client = solana_client::rpc_client::RpcClient::new("https://api.devnet.solana.com"); // Kept for blockhash
 
-    // Use the known-good keypair bytes from the `cu` test
     let payer_bytes = [
         252, 148, 183, 236, 100, 64, 108, 105, 26, 181, 229, 97, 54, 43, 113, 1, 253, 4, 109, 80,
         183, 26, 222, 43, 209, 246, 12, 80, 15, 246, 53, 149, 189, 22, 176, 152, 33, 128, 187, 215,
         121, 56, 191, 187, 241, 223, 7, 109, 96, 88, 243, 76, 92, 122, 185, 245, 185, 255, 80, 125,
         80, 157, 229, 222,
     ];
-    let payer = Keypair::from_bytes(&payer_bytes)
-        .expect("Failed to create payer keypair from known-good bytes.");
+    let payer = Keypair::from_bytes(&payer_bytes).unwrap();
 
     let recipient1 = Keypair::new().pubkey();
     let recipient2 = Keypair::new().pubkey();
@@ -156,8 +154,7 @@ fn test_rollup_channel_tagging() {
         .expect("Failed to get latest blockhash");
 
     let accounts_for_channel = vec![payer.pubkey(), recipient1, recipient2];
-    // RollUpChannel is available via `use solana_client_ext::*;`
-    let mut channel = RollUpChannel::new(accounts_for_channel, &rpc_client);
+        let mut channel = RollUpChannel::new(accounts_for_channel, &rpc_client);
 
     let tx1 = create_transfer_tx(&payer, &recipient1, 1000, recent_blockhash);
     let tx2 = create_transfer_tx(&payer, &recipient2, 2000, recent_blockhash);
