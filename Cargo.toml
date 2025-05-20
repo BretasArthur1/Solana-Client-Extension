@@ -1,0 +1,29 @@
+[package]
+name = "solana_client_ext"
+version = "0.1.1"
+edition = "2021"
+authors = ["BretasArthur1 arthurbretas@gmail.com", "bergabman bergabman1@gmail.com"]
+description = "Solana client extension for compute unit optimization and detailed transaction results"
+repository = "https://github.com/BretasArthur1/Solana-Rust-Client-Extension"
+documentation = "https://docs.rs/solana_client_ext"
+homepage = "https://github.com/BretasArthur1/Solana-Rust-Client-Extension"
+license = "MIT OR Apache-2.0"
+keywords = ["solana", "blockchain", "compute-units", "transaction", "rollup"]
+categories = ["cryptography::cryptocurrencies", "api-bindings", "development-tools"]
+
+
+[dependencies]
+solana-client = "2.2.2"
+solana-sdk = { version = "2.2.2", features = ["default"] }
+solana-program-runtime = "2.2.2"
+solana-compute-budget = "2.2.2"
+solana-svm="2.2.2"
+solana-bpf-loader-program = "2.2.2"
+solana-svm-transaction = "2.2.2"
+agave-feature-set = "2.2.2"
+solana-system-program = "2.2.2"
+solana-svm-callback = "0.0.0"
+
+
+[lib]
+path = "src/lib.rs"
