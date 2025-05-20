@@ -27,3 +27,6 @@ solana-svm-callback = "0.0.0"
 
 [lib]
 path = "src/lib.rs"
+
+[dev-dependencies]
+serde_json = "1.0"

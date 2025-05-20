@@ -5,6 +5,7 @@
 /// - Whether the transaction was successful
 /// - How many compute units were consumed
 /// - What the result or error message was
+#[derive(Debug, Clone)]
 pub struct ReturnStruct {
     /// `true` if the transaction executed successfully without runtime errors.
     pub success: bool,

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use solana_client::rpc_client::RpcClient;
@@ -23,15 +24,22 @@ use crate::{ForkRollUpGraph, ReturnStruct};
 pub struct RollUpChannel<'a> {
     /// A list of the account keys extracted from the transaction,
     /// passed into the rollup channel for SVM simulation and processing.
+    #[allow(dead_code)]
     keys: Vec<Pubkey>,
     /// Reference to an RPC client used to fetch account and cluster data.
     rpc_client: &'a RpcClient,
+    /// Stores ReturnStruct results for tagged transactions.
+    tagged_results: HashMap<String, Vec<ReturnStruct>>,
 }
 
 impl<'a> RollUpChannel<'a> {
     /// Constructs a new `RollUpChannel` with a list of public keys and an RPC client reference.
     pub fn new(keys: Vec<Pubkey>, rpc_client: &'a RpcClient) -> Self {
-        Self { keys, rpc_client }
+        Self {
+            keys,
+            rpc_client,
+            tagged_results: HashMap::new(),
+        }
     }
 
     /// Simulates a batch of Solana transactions using the SVM runtime.
@@ -140,12 +148,33 @@ impl<'a> RollUpChannel<'a> {
             return_results.push(tx_result);
         }
 
-        /// If there were no results but transactions were submitted,
+        // If there were no results but transactions were submitted,
         // return a fallback result to avoid empty output.
         if return_results.is_empty() && !transactions.is_empty() {
             return_results.push(ReturnStruct::no_results());
         }
 
         return_results
+    }
+
+    /// Simulates a batch of Solana transactions, stores their results under the given tag, and returns them.
+    pub fn process_rollup_transfers_and_tag(
+        &mut self,
+        transactions: &[Transaction],
+        tag: String,
+    ) -> Vec<ReturnStruct> {
+        let results = self.process_rollup_transfers(transactions);
+
+        self.tagged_results
+            .entry(tag)
+            .or_default()
+            .extend(results.clone());
+
+        results
+    }
+
+    /// Retrieves stored `ReturnStruct` results for a given tag.
+    pub fn get_tagged_results(&self, tag: &str) -> Option<&Vec<ReturnStruct>> {
+        self.tagged_results.get(tag)
     }
 }
