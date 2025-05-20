@@ -2,7 +2,7 @@
 name = "solana_client_ext"
 version = "0.1.1"
 edition = "2021"
-authors = ["BretasArthur1 arthurbretas@gmail.com", "bergabman bergabman1@gmail.com"]
+authors = ["BretasArthur1 arthurbretas@gmail.com", "bergabman bergabman1@gmail.com", "Jars1987 joserelvassantos@gmail.com", "Manudasari265 dasarimanoj265@gmail.com "]
 description = "Solana client extension for compute unit optimization and detailed transaction results"
 repository = "https://github.com/BretasArthur1/Solana-Rust-Client-Extension"
 documentation = "https://docs.rs/solana_client_ext"
