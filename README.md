@@ -1,11 +1,11 @@
 # Solana Rust Client Extension
 
-This crate provides extensions for the Solana Rust client, focusing on compute unit estimation and optimization. It also provides transaction execution details via the `ReturnStruct` for more robust transaction processing.
+This crate provides extensions for the Solana Rust client, focusing on compute unit estimation and optimization. It also provides transaction execution details via the `RawSimulationResult` and `SimulationAnalysisResult` structs for more robust transaction processing.
 
 ## Features
 * Estimates compute units for Solana transactions
 * Optimizes compute unit usage by adding a compute budget instruction
-* Returns detailed transaction execution information:
+* Returns detailed transaction execution information (via `RawSimulationResult` and `SimulationAnalysisResult`):
   * Success/failure status
   * Compute units used
   * Detailed result message or error information
@@ -53,42 +53,50 @@ fn main() {
 }
 ```
 
-### Using ReturnStruct for Detailed Transaction Information
+### Using Simulation Results for Detailed Transaction Information
 
-You can also get detailed transaction results using the `ReturnStruct`:
+You can get detailed transaction simulation results using `RawSimulationResult` (often via `RollUpChannel::simulate_transactions_raw`):
 
 ```rust
 use solana_client::rpc_client::RpcClient;
-use solana_client_ext::{RpcClientExt, RollUpChannel};
+// Assuming RollUpChannel is available from your crate, e.g., solana_client_ext::state::rollup_channel::RollUpChannel;
+// And RawSimulationResult from solana_client_ext::state::return_struct::RawSimulationResult;
+use solana_client_ext::state::rollup_channel::RollUpChannel; 
 use solana_sdk::{
+    message::Message, // Added Message import
     pubkey::Pubkey, signature::Keypair, signer::Signer, system_instruction,
     transaction::Transaction,
 };
 
 fn main() {
-    let rpc_client = RpcClient::new("https://api.devnet.solana.com");
-    let keypair = Keypair::new();
+    let rpc_client = RpcClient::new("https://api.devnet.solana.com".to_string());
+    let payer = Keypair::new(); // Ensure payer has SOL for actual transactions
     
     // Create a simple transfer transaction
     let transfer_ix = system_instruction::transfer(
-        &keypair.pubkey(), 
+        &payer.pubkey(), 
         &Pubkey::new_unique(), 
         10000
     );
-    let msg = Message::new(&[transfer_ix], Some(&keypair.pubkey()));
-    let blockhash = rpc_client.get_latest_blockhash().unwrap();
-    let tx = Transaction::new(&[&keypair], msg, blockhash);
+    let msg = Message::new(&[transfer_ix], Some(&payer.pubkey()));
+    // let blockhash = rpc_client.get_latest_blockhash().unwrap(); // Needed if you were to sign and send
+    let tx = Transaction::new_unsigned(msg); // For local simulation, blockhash isn't strictly part of RawSimulationResult focus
     
-    // Process the transaction and get detailed results
-    let accounts = tx.message.account_keys.clone();
-    let rollup_c = RollUpChannel::new(accounts, &rpc_client);
-    let results = rollup_c.process_rollup_transfers(&[tx.clone()]);
+    // Process the transaction locally using RollUpChannel to get raw simulation results
+    let accounts_for_simulation = tx.message.account_keys.clone(); // Collect all accounts involved
+    let rollup_channel = RollUpChannel::new(accounts_for_simulation, &rpc_client);
     
-    // Display transaction results
-    for (i, result) in results.iter().enumerate() {
-        println!("Transaction {}: Success={}, CU={}, Result: {}", 
+    // simulate_transactions_raw returns Vec<RawSimulationResult>
+    let raw_simulation_results = rollup_channel.simulate_transactions_raw(&[tx.clone()]);
+    
+    // Display transaction results from RawSimulationResult
+    println!("Local Raw Simulation Results:");
+    for (i, result) in raw_simulation_results.iter().enumerate() {
+        println!("  Transaction {}: Success={}, CU={}, Result: '{}'", 
             i, result.success, result.cu, result.result);
     }
+    
+    // For more advanced, tagged analyses, refer to TaggedAnalysisClient and SimulationAnalysisResult in lib.rs examples.
 }
 ```
 

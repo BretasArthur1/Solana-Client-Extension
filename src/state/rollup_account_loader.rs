@@ -5,26 +5,21 @@ use solana_svm::transaction_processing_callback::TransactionProcessingCallback;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-/// A lightweight account loader that retrieves account data from an RPC client,
-/// with a built-in in-memory cache for fast repeated access during transaction simulation.
+/// Lightweight account loader with an in-memory cache.
 ///
-/// This struct is intended to be used with the SVM's `TransactionBatchProcessor` by
-/// implementing the `TransactionProcessingCallback` trait.
-///
-/// It avoids redundant RPC calls by caching account data locally in a thread-safe
-/// `RwLock<HashMap<...>>`.
+/// Retrieves account data via RPC and caches it for fast repeated access.
+/// Implements `TransactionProcessingCallback` for SVM integration.
 pub struct RollUpAccountLoader<'a> {
-    /// A local, thread-safe cache of account data by Pubkey.
+    /// Local, thread-safe cache of account data (Pubkey -> AccountSharedData).
     cache: RwLock<HashMap<Pubkey, AccountSharedData>>,
-    // Reference to the RPC client used to fetch uncached accounts.
+    /// RPC client reference for fetching uncached accounts.
     rpc_client: &'a RpcClient,
 }
 
 impl<'a> RollUpAccountLoader<'a> {
-    /// Create a new account loader using the given RPC client.
+    /// Creates a new `RollUpAccountLoader`.
     ///
-    /// This loader will attempt to cache all accounts retrieved, making it efficient
-    /// for use in high-frequency local simulations.
+    /// Uses the given RPC client and caches retrieved accounts.
     pub fn new(rpc_client: &'a RpcClient) -> Self {
         Self {
             cache: RwLock::new(HashMap::new()),
@@ -33,15 +28,13 @@ impl<'a> RollUpAccountLoader<'a> {
     }
 }
 
-/// Implements the `TransactionProcessingCallback` trait, which allows this
-/// loader to be used during SVM transaction processing.
+/// Implements `TransactionProcessingCallback` for SVM transaction processing.
 ///
-/// The processor will use this callback to fetch account data as needed during execution.
+/// The processor uses this to fetch account data during execution.
 impl TransactionProcessingCallback for RollUpAccountLoader<'_> {
-    /// Attempts to retrieve account data for the given public key.
+    /// Retrieves account data for a given public key.
     ///
-    /// First checks the internal cache. If the account is not cached, it fetches
-    /// the data via RPC, stores it in the cache, and returns it.
+    /// Checks cache first, then fetches via RPC and caches if not found.
     fn get_account_shared_data(&self, pubkey: &Pubkey) -> Option<AccountSharedData> {
         if let Some(account) = self.cache.read().unwrap().get(pubkey) {
             return Some(account.clone());
@@ -56,10 +49,9 @@ impl TransactionProcessingCallback for RollUpAccountLoader<'_> {
         Some(account)
     }
 
-    /// Determines whether the specified account is owned by one of the provided owners.
+    /// Checks if an account is owned by one of the provided owners.
     ///
-    /// This is useful during transaction processing for filtering or validating accounts
-    /// that must be owned by a specific program (e.g., System or Token program).
+    /// Useful for filtering or validating accounts against specific program owners.
     fn account_matches_owners(&self, account: &Pubkey, owners: &[Pubkey]) -> Option<usize> {
         self.get_account_shared_data(account)
             .and_then(|account| owners.iter().position(|key| account.owner().eq(key)))
