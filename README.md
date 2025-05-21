@@ -59,8 +59,6 @@ You can get detailed transaction simulation results using `RawSimulationResult` 
 
 ```rust
 use solana_client::rpc_client::RpcClient;
-// Assuming RollUpChannel is available from your crate, e.g., solana_client_ext::state::rollup_channel::RollUpChannel;
-// And RawSimulationResult from solana_client_ext::state::return_struct::RawSimulationResult;
 use solana_client_ext::state::rollup_channel::RollUpChannel; 
 use solana_sdk::{
     message::Message, // Added Message import
