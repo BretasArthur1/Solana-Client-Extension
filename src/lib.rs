@@ -216,13 +216,10 @@ use crate::state::fork_rollup_graph::ForkRollUpGraph;
 use anyhow::Result;
 use async_trait::async_trait;
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_sdk::pubkey::Pubkey;
-use solana_transaction_status::PrioritizationFee;
-pub use state::{return_struct::ReturnStruct, rollup_channel::RollUpChannel};
-pub use crate::state::return_struct::{
-    AnalysisResultDetail, ComputeUnitsDetails, RawSimulationResult, SimulationAnalysisResult,
+pub use crate::state::{
+    return_struct::{AnalysisResultDetail, ComputeUnitsDetails, RawSimulationResult, SimulationAnalysisResult},
+    rollup_channel::RollUpChannel,
 };
-use crate::state::rollup_channel::RollUpChannel;
 
 /// Configuration for transaction simulation analyses.
 #[derive(Default, Debug, Clone)]

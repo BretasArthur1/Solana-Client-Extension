@@ -23,6 +23,9 @@ solana-svm-transaction = "2.2.2"
 agave-feature-set = "2.2.2"
 solana-system-program = "2.2.2"
 solana-svm-callback = "0.0.0"
+anyhow = "1.0.98"
+async-trait = "0.1.88"
+solana-transaction-status = "2.2.7"
 
 
 [lib]
