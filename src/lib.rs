@@ -212,8 +212,13 @@ use std::collections::HashMap;
 mod error;
 pub mod state;
 mod utils;
-
 use crate::state::fork_rollup_graph::ForkRollUpGraph;
+use anyhow::Result;
+use async_trait::async_trait;
+use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_sdk::pubkey::Pubkey;
+use solana_transaction_status::PrioritizationFee;
+pub use state::{return_struct::ReturnStruct, rollup_channel::RollUpChannel};
 pub use crate::state::return_struct::{
     AnalysisResultDetail, ComputeUnitsDetails, RawSimulationResult, SimulationAnalysisResult,
 };
@@ -301,6 +306,17 @@ impl TaggedAnalysisClient {
         self.tagged_results_store.get(tag)
     }
 }
+#[async_trait::async_trait]
+pub trait RpcClientExtAsync {
+    /// Estimates the total prioritization fee in lamports for the given CU.
+    ///
+    /// If `accounts` is `None`, fetches global average from recent slot.
+    async fn estimate_priority_fee_for_cu(
+        &self,
+        accounts: Option<&[Pubkey]>,
+        cu: u64,
+    ) -> Result<u64>; // Total fee in lamports
+}
 
 pub trait RpcClientExt {
     /// Estimates CUs for an **unsigned transaction** using rollup-based simulation.
@@ -344,6 +360,33 @@ pub trait RpcClientExt {
         message: &mut Message,
         signers: &'a I,
     ) -> Result<u32, Box<dyn std::error::Error + 'static>>;
+}
+
+#[async_trait::async_trait]
+impl RpcClientExtAsync for RpcClient {
+    /// Estimates the total priority fee (in lamports) required to execute a transaction
+    /// with a given compute unit budget, based on recent prioritization fee data.
+    async fn estimate_priority_fee_for_cu(
+        &self,
+        accounts: Option<&[Pubkey]>, // Optional list of accounts to base the fee estimation on
+        cu: u64,                     // Target compute unit budget for which to estimate fees
+    ) -> Result<u64> {
+        // Fetch recent prioritization fees using provided accounts or empty list if None
+        let fees = match accounts {
+            Some(addrs) => self.get_recent_prioritization_fees(addrs).await?,
+            None => self.get_recent_prioritization_fees(&[]).await?,
+        };
+
+        // Extract the highest fee per compute unit (in micro-lamports) from the results
+        let best_fee_per_cu_micro = fees.iter().map(|f| f.prioritization_fee).max().unwrap_or(0);
+
+        // Calculate total fee by multiplying best micro-lamport rate with requested CU,
+        // then convert from micro-lamports to lamports (1 lamport = 1_000_000 micro-lamports)
+        let total_lamports = (best_fee_per_cu_micro as u128 * cu as u128) / 1_000_000;
+
+        // Return the total estimated fee in lamports
+        Ok(total_lamports as u64)
+    }
 }
 
 impl RpcClientExt for solana_client::rpc_client::RpcClient {
