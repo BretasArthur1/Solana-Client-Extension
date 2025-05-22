@@ -15,25 +15,31 @@ use solana_svm::transaction_processor::{
     TransactionProcessingConfig, TransactionProcessingEnvironment,
 };
 
+use crate::state::return_struct::{
+    AnalysisResultDetail, ComputeUnitsDetails, RawSimulationResult, SimulationAnalysisResult,
+};
 use crate::state::rollup_account_loader::RollUpAccountLoader;
 use crate::utils::helpers::{create_transaction_batch_processor, get_transaction_check_results};
-use crate::{ForkRollUpGraph, ReturnStruct};
+use crate::AnalysisConfig;
+use crate::ForkRollUpGraph;
 
-/// Handles a group of accounts and enables simulation of transactions
-/// using Solana's SVM runtime with preconfigured defaults.
+/// Handles a group of accounts and simulates transactions using Solana's SVM.
+///
+/// Uses preconfigured defaults for the SVM runtime.
 pub struct RollUpChannel<'a> {
-    /// A list of the account keys extracted from the transaction,
-    /// passed into the rollup channel for SVM simulation and processing.
+    /// Account keys from the transaction, used for SVM simulation.
     #[allow(dead_code)]
     keys: Vec<Pubkey>,
-    /// Reference to an RPC client used to fetch account and cluster data.
+    /// RPC client reference for fetching account and cluster data.
     rpc_client: &'a RpcClient,
-    /// Stores ReturnStruct results for tagged transactions.
-    tagged_results: HashMap<String, Vec<ReturnStruct>>,
+    /// Stores `SimulationAnalysisResult` for tagged transactions.
+    tagged_results: HashMap<String, Vec<SimulationAnalysisResult>>,
 }
 
 impl<'a> RollUpChannel<'a> {
-    /// Constructs a new `RollUpChannel` with a list of public keys and an RPC client reference.
+    /// Constructs a `RollUpChannel`.
+    ///
+    /// Takes a list of public keys and an RPC client reference.
     pub fn new(keys: Vec<Pubkey>, rpc_client: &'a RpcClient) -> Self {
         Self {
             keys,
@@ -42,32 +48,30 @@ impl<'a> RollUpChannel<'a> {
         }
     }
 
-    /// Simulates a batch of Solana transactions using the SVM runtime.
+    /// Performs base simulation of transactions and returns raw results.
     ///
-    /// This method:
-    /// 1. Converts `Transaction`s into `SanitizedTransaction`s
-    /// 2. Creates an SVM batch processor with default settings
-    /// 3. Executes the transactions using the processor
-    /// 4. Returns execution results, including compute units used and logs
-    pub fn process_rollup_transfers(&self, transactions: &[Transaction]) -> Vec<ReturnStruct> {
-        // Step 1: Convert raw transactions into sanitized format required by the SVM processor.
+    /// This is the core simulation logic without extra analysis or tagging.
+    pub fn simulate_transactions_raw(
+        &self,
+        transactions: &[Transaction],
+    ) -> Vec<RawSimulationResult> {
         let sanitized = transactions
             .iter()
             .map(|tx| SolanaSanitizedTransaction::from_transaction_for_tests(tx.clone()))
             .collect::<Vec<SolanaSanitizedTransaction>>();
 
-        // Default configuration values for SVM transaction simulation.
-        // These can be overridden later if custom behavior is needed.
+        // Default configuration for SVM transaction simulation.
+        // Can be overridden if custom behavior is needed.
         let compute_budget = ComputeBudget::default();
         let feature_set = Arc::new(FeatureSet::all_enabled());
         let fee_structure = FeeStructure::default();
         let _rent_collector = RentCollector::default();
 
-        // Custom account loader implementation for fetching account data via the RPC client.
+        // Custom account loader for fetching account data via RPC.
         let account_loader = RollUpAccountLoader::new(&self.rpc_client);
 
-        // Create an SVM-compatible transaction batch processor.
-        // This is the entry point for executing transactions against the Solana runtime logic.
+        // Creates an SVM-compatible transaction batch processor.
+        // Entry point for executing transactions against Solana runtime logic.
         let fork_graph = Arc::new(RwLock::new(ForkRollUpGraph {}));
         let processor = create_transaction_batch_processor(
             &account_loader,
@@ -77,7 +81,7 @@ impl<'a> RollUpChannel<'a> {
         );
         println!("transaction batch processor created ");
 
-        // Create a simulation environment, similar to a Solana runtime slot.
+        // Creates a simulation environment, similar to a Solana runtime slot.
         let processing_environment = TransactionProcessingEnvironment {
             blockhash: Hash::default(),
             blockhash_lamports_per_signature: fee_structure.lamports_per_signature,
@@ -87,13 +91,13 @@ impl<'a> RollUpChannel<'a> {
             rent_collector: None,
         };
 
-        // Use the default transaction processing config.
-        // Can be extended to support more fine-grained control.
+        // Uses the default transaction processing config.
+        // Can be extended for more fine-grained control.
         let processing_config = TransactionProcessingConfig::default();
 
         println!("transaction processing_config created ");
 
-        // Step 2: Execute the sanitized transactions using the simulated runtime.
+        // Executes sanitized transactions using the simulated runtime.
         let results = processor.load_and_execute_sanitized_transactions(
             &account_loader,
             &sanitized,
@@ -101,80 +105,108 @@ impl<'a> RollUpChannel<'a> {
             &processing_environment,
             &processing_config,
         );
-        println!("Executed");
 
-        // Step 3: Parse each transaction result and convert it into a ReturnStruct.
         let mut return_results = Vec::new();
-
         for (i, transaction_result) in results.processing_results.iter().enumerate() {
             let tx_result = match transaction_result {
-                Ok(processed_tx) => {
-                    match processed_tx {
-                        ProcessedTransaction::Executed(executed_tx) => {
-                            let cu = executed_tx.execution_details.executed_units;
-                            let logs = executed_tx.execution_details.log_messages.clone();
-                            let status = executed_tx.execution_details.status.clone();
-                            let is_success = status.is_ok();
-
-                            if is_success {
-                                ReturnStruct::success(cu)
-                            } else {
-                                match status {
-                                    Err(err) => {
-                                        let error_msg =
-                                            format!("Transaction {} failed with error: {}", i, err);
-                                        let log_msg =
-                                            logs.map(|logs| logs.join("\n")).unwrap_or_default();
-                                        ReturnStruct {
-                                            success: false,
-                                            cu,
-                                            result: format!("{}\nLogs:\n{}", error_msg, log_msg),
-                                        }
-                                    }
-                                    _ => ReturnStruct::success(cu), // This shouldn't happen as we checked is_success
-                                }
-                            }
-                        }
-                        ProcessedTransaction::FeesOnly(fees_only) => {
-                            ReturnStruct::failure(format!(
-                                "Transaction {} failed with error: {}. Only fees were charged.",
-                                i, fees_only.load_error
+                Ok(processed_tx) => match processed_tx {
+                    ProcessedTransaction::Executed(executed_tx) => {
+                        let cu = executed_tx.execution_details.executed_units;
+                        let logs = executed_tx.execution_details.log_messages.clone();
+                        let status = executed_tx.execution_details.status.clone();
+                        if status.is_ok() {
+                            // Construct RawSimulationResult, potentially including logs if added to its fields
+                            let res = RawSimulationResult::base_success(cu);
+                            // If RawSimulationResult is extended to hold logs:
+                            // if let Some(log_vec) = logs { res.logs = Some(log_vec); }
+                            res
+                        } else {
+                            let error_msg = format!(
+                                "Transaction {} failed with error: {}",
+                                i,
+                                status.unwrap_err()
+                            );
+                            let log_msg = logs.map(|l| l.join("\n")).unwrap_or_default();
+                            RawSimulationResult::base_failure(format!(
+                                "{}\nLogs:\n{}",
+                                error_msg, log_msg
                             ))
                         }
                     }
+                    ProcessedTransaction::FeesOnly(fees_only) => {
+                        RawSimulationResult::base_failure(format!(
+                            "Transaction {} failed with error: {}. Only fees were charged.",
+                            i, fees_only.load_error
+                        ))
+                    }
+                },
+                Err(err) => {
+                    RawSimulationResult::base_failure(format!("Transaction {} failed: {}", i, err))
                 }
-                Err(err) => ReturnStruct::failure(format!("Transaction {} failed: {}", i, err)),
             };
             return_results.push(tx_result);
         }
-
-        // If there were no results but transactions were submitted,
-        // return a fallback result to avoid empty output.
         if return_results.is_empty() && !transactions.is_empty() {
-            return_results.push(ReturnStruct::no_results());
+            return_results.push(RawSimulationResult::base_no_results());
         }
-
         return_results
     }
 
-    /// Simulates a batch of Solana transactions, stores their results under the given tag, and returns them.
-    pub fn process_rollup_transfers_and_tag(
+    /// Processes transactions with specified analyses.
+    ///
+    /// Stores results if a tag is provided in the `AnalysisConfig`.
+    pub fn process_transactions_with_analysis(
         &mut self,
         transactions: &[Transaction],
-        tag: String,
-    ) -> Vec<ReturnStruct> {
-        let results = self.process_rollup_transfers(transactions);
+        config: &AnalysisConfig,
+    ) -> Vec<SimulationAnalysisResult> {
+        let raw_simulation_results = self.simulate_transactions_raw(transactions);
 
-        self.tagged_results
-            .entry(tag)
-            .or_default()
-            .extend(results.clone());
+        let mut analysis_results: Vec<SimulationAnalysisResult> = Vec::new();
 
-        results
+        for raw_res in raw_simulation_results.iter() {
+            if config.estimate_compute_units {
+                // Extract logs if RawSimulationResult is updated to hold them directly
+                // For now, passing None for logs from raw_res.
+                let logs_for_cu_details = None;
+                // let logs_for_cu_details = raw_res.logs.clone(); // if RawSimulationResult had logs
+
+                let cu_details = ComputeUnitsDetails {
+                    cu_consumed: raw_res.cu,
+                    logs: logs_for_cu_details,
+                    error_message: if raw_res.success {
+                        None
+                    } else {
+                        Some(raw_res.result.clone())
+                    },
+                };
+                analysis_results.push(SimulationAnalysisResult {
+                    base_simulation_success: raw_res.success,
+                    analysis_type: "compute_units".to_string(),
+                    details: AnalysisResultDetail::ComputeUnits(cu_details),
+                    top_level_error_message: if raw_res.success {
+                        None
+                    } else {
+                        Some(raw_res.result.clone())
+                    },
+                });
+            }
+        }
+
+        if let Some(tag_str) = &config.tag {
+            if !analysis_results.is_empty() {
+                self.tagged_results
+                    .entry(tag_str.clone())
+                    .or_default()
+                    .extend(analysis_results.clone());
+            }
+        }
+
+        analysis_results
     }
 
-    /// Retrieves stored `ReturnStruct` results for a given tag.
-    pub fn get_tagged_results(&self, tag: &str) -> Option<&Vec<ReturnStruct>> {
+    /// Retrieves stored `SimulationAnalysisResult` for a given tag.
+    pub fn get_tagged_results(&self, tag: &str) -> Option<&Vec<SimulationAnalysisResult>> {
         self.tagged_results.get(tag)
     }
 }
