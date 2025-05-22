@@ -1,56 +1,85 @@
-/// A simple struct that encapsulates the outcome of a simulated or real transaction execution.
+/// Encapsulates the outcome of a simulated or real transaction execution.
 ///
-/// This is especially useful when working with local transaction simulation tools
-/// (like `ClientExt`) where you want to track:
-/// - Whether the transaction was successful
-/// - How many compute units were consumed
-/// - What the result or error message was
+/// Useful for tracking:
+/// - Transaction success status
+/// - Compute units consumed
+/// - Result or error messages
 #[derive(Debug, Clone)]
-pub struct ReturnStruct {
-    /// `true` if the transaction executed successfully without runtime errors.
+pub struct RawSimulationResult {
+    /// `true` if the base transaction simulation succeeded without runtime errors.
     pub success: bool,
-    /// The number of compute units consumed during execution.
-    ///
-    /// This is only meaningful when `success == true`. On failure, this will be 0.
-    pub cu: u64,
-    /// A human-readable result message, used for debugging and logs.
-    /// Can contain either success details or an error description.
+    /// Compute units consumed during execution.
+    pub cu: u64, // May become Option<u64> or part of an enum variant later
+    /// Human-readable result message for debugging/logs.
+    /// Contains success details or base simulation error description.
     pub result: String,
 }
 
-impl ReturnStruct {
-    /// Construct a successful result with the given compute unit usage.
-    ///
-    /// The compute unit count helps benchmark cost and complexity.
-    pub fn success(cu: u64) -> Self {
+impl RawSimulationResult {
+    /// Constructs a successful base simulation result.
+    pub fn base_success(cu: u64) -> Self {
         Self {
             success: true,
             cu,
             result: format!(
-                "Transaction executed successfully with {} compute units",
+                "Base simulation executed successfully with {} compute units",
                 cu
             ),
         }
     }
 
-    /// Construct a failed result with a specific error message.
-    pub fn failure(error: impl ToString) -> Self {
+    /// Constructs a failed base simulation result.
+    pub fn base_failure(error: impl ToString) -> Self {
         Self {
             success: false,
-            cu: 0,
+            cu: 0, // Or from simulation if available even on failure
             result: error.to_string(),
         }
     }
 
-    /// Construct a result representing a missing or empty response.
-    ///
-    /// It can occur when SVM engine doesn't return results—e.g.,
-    /// due to a misconfigured processor, lack of transaction output, or internal error.
-    pub fn no_results() -> Self {
+    /// Constructs a result for missing/empty base simulation responses.
+    pub fn base_no_results() -> Self {
         Self {
             success: false,
             cu: 0,
-            result: "No transaction results returned".to_string(),
+            result: "No base simulation results returned".to_string(),
         }
     }
+}
+
+// New Type Definitions for Analysis Results
+
+/// Details related to compute unit estimation.
+#[derive(Debug, Clone)]
+pub struct ComputeUnitsDetails {
+    /// Compute units consumed.
+    pub cu_consumed: u64,
+    /// Optional execution logs.
+    pub logs: Option<Vec<String>>,
+    /// Optional error message specific to CU estimation.
+    pub error_message: Option<String>, // Error specific to CU estimation, if any
+}
+
+/// Enum for different types of analysis result details.
+#[derive(Debug, Clone)]
+pub enum AnalysisResultDetail {
+    /// Detailed results of compute unit analysis.
+    ComputeUnits(ComputeUnitsDetails),
+    // PriorityFee(PriorityFeeDetails),
+    // Future analysis types can be added here
+}
+
+/// Represents the outcome of one or more analyses on a transaction simulation.
+#[derive(Debug, Clone)]
+pub struct SimulationAnalysisResult {
+    /// `true` if the underlying base transaction simulation was successful.
+    /// If `false`, specific analysis details might be missing or indicate failure.
+    pub base_simulation_success: bool,
+    /// Type of analysis (e.g., "compute_units", "priority_fee").
+    pub analysis_type: String,
+    /// Detailed result of the specific analysis.
+    pub details: AnalysisResultDetail,
+    /// Optional top-level error message.
+    /// For issues with the analysis itself or to reiterate base simulation errors.
+    pub top_level_error_message: Option<String>,
 }
