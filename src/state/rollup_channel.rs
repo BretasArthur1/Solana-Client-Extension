@@ -17,11 +17,13 @@ use solana_svm::transaction_processor::{
 
 use crate::state::return_struct::{
     AnalysisResultDetail, ComputeUnitsDetails, RawSimulationResult, SimulationAnalysisResult,
+    PrioritizationFeeDetails,
 };
 use crate::state::rollup_account_loader::RollUpAccountLoader;
 use crate::utils::helpers::{create_transaction_batch_processor, get_transaction_check_results};
 use crate::AnalysisConfig;
 use crate::ForkRollUpGraph;
+use crate::RpcClientExt;
 
 /// Handles a group of accounts and simulates transactions using Solana's SVM.
 ///
@@ -54,6 +56,7 @@ impl<'a> RollUpChannel<'a> {
     pub fn simulate_transactions_raw(
         &self,
         transactions: &[Transaction],
+        analysis_config: &AnalysisConfig,
     ) -> Vec<RawSimulationResult> {
         let sanitized = transactions
             .iter()
@@ -108,17 +111,40 @@ impl<'a> RollUpChannel<'a> {
 
         let mut return_results = Vec::new();
         for (i, transaction_result) in results.processing_results.iter().enumerate() {
-            let tx_result = match transaction_result {
+            let mut fee_details: Option<PrioritizationFeeDetails> = None;
+            let executed_cu = match transaction_result {
+                Ok(ProcessedTransaction::Executed(executed_tx)) => executed_tx.execution_details.executed_units,
+                _ => 0,
+            };
+
+            if analysis_config.calculate_priority_fee && executed_cu > 0 {
+                let accounts_for_fee_estimation: Vec<Pubkey> = transactions[i].message.account_keys.iter().cloned().collect();
+                match self.rpc_client.estimate_priority_fee_for_cu_sync(Some(&accounts_for_fee_estimation), executed_cu) {
+                    Ok(estimated_fee) => {
+                        fee_details = Some(PrioritizationFeeDetails {
+                            fee_per_cu_micro_lamports: estimated_fee.fee_per_cu_micro_lamports,
+                            total_fee_lamports: estimated_fee.total_fee_lamports,
+                            error_message: None,
+                        });
+                    }
+                    Err(e) => {
+                        fee_details = Some(PrioritizationFeeDetails {
+                            error_message: Some(format!("Failed to estimate priority fee: {}", e)),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+
+            let tx_result: RawSimulationResult = match transaction_result {
                 Ok(processed_tx) => match processed_tx {
                     ProcessedTransaction::Executed(executed_tx) => {
                         let cu = executed_tx.execution_details.executed_units;
                         let logs = executed_tx.execution_details.log_messages.clone();
                         let status = executed_tx.execution_details.status.clone();
                         if status.is_ok() {
-                            // Construct RawSimulationResult, potentially including logs if added to its fields
-                            let res = RawSimulationResult::base_success(cu);
-                            // If RawSimulationResult is extended to hold logs:
-                            // if let Some(log_vec) = logs { res.logs = Some(log_vec); }
+                            let mut res = RawSimulationResult::base_success(cu);
+                            res.prioritization_fee_details = fee_details;
                             res
                         } else {
                             let error_msg = format!(
@@ -127,21 +153,27 @@ impl<'a> RollUpChannel<'a> {
                                 status.unwrap_err()
                             );
                             let log_msg = logs.map(|l| l.join("\n")).unwrap_or_default();
-                            RawSimulationResult::base_failure(format!(
+                            let mut res = RawSimulationResult::base_failure(format!(
                                 "{}\nLogs:\n{}",
                                 error_msg, log_msg
-                            ))
+                            ));
+                            res.prioritization_fee_details = fee_details; // Also add here for context if needed
+                            res
                         }
                     }
                     ProcessedTransaction::FeesOnly(fees_only) => {
-                        RawSimulationResult::base_failure(format!(
+                        let mut res = RawSimulationResult::base_failure(format!(
                             "Transaction {} failed with error: {}. Only fees were charged.",
                             i, fees_only.load_error
-                        ))
+                        ));
+                        res.prioritization_fee_details = fee_details;
+                        res
                     }
                 },
                 Err(err) => {
-                    RawSimulationResult::base_failure(format!("Transaction {} failed: {}", i, err))
+                    let mut res = RawSimulationResult::base_failure(format!("Transaction {} failed: {}", i, err));
+                    res.prioritization_fee_details = fee_details;
+                    res
                 }
             };
             return_results.push(tx_result);
@@ -160,16 +192,13 @@ impl<'a> RollUpChannel<'a> {
         transactions: &[Transaction],
         config: &AnalysisConfig,
     ) -> Vec<SimulationAnalysisResult> {
-        let raw_simulation_results = self.simulate_transactions_raw(transactions);
+        let raw_simulation_results = self.simulate_transactions_raw(transactions, config);
 
         let mut analysis_results: Vec<SimulationAnalysisResult> = Vec::new();
 
         for raw_res in raw_simulation_results.iter() {
             if config.estimate_compute_units {
-                // Extract logs if RawSimulationResult is updated to hold them directly
-                // For now, passing None for logs from raw_res.
                 let logs_for_cu_details = None;
-                // let logs_for_cu_details = raw_res.logs.clone(); // if RawSimulationResult had logs
 
                 let cu_details = ComputeUnitsDetails {
                     cu_consumed: raw_res.cu,
@@ -190,6 +219,35 @@ impl<'a> RollUpChannel<'a> {
                         Some(raw_res.result.clone())
                     },
                 });
+            }
+            // New block for priority fee analysis
+            if config.calculate_priority_fee {
+                if let Some(details) = &raw_res.prioritization_fee_details {
+                    analysis_results.push(SimulationAnalysisResult {
+                        base_simulation_success: raw_res.success, // Base success is relevant here too
+                        analysis_type: "priority_fee".to_string(),
+                        details: AnalysisResultDetail::PriorityFee(details.clone()),
+                        top_level_error_message: details.error_message.clone().or_else(|| {
+                            if !raw_res.success {
+                                Some(raw_res.result.clone())
+                            } else {
+                                None
+                            }
+                        }),
+                    });
+                } else {
+                    // This case might occur if fee calculation was skipped due to cu=0 or other reasons
+                    // Or if it failed and RawSimulationResult wasn't populated (though current logic tries to populate with error)
+                    analysis_results.push(SimulationAnalysisResult {
+                        base_simulation_success: raw_res.success,
+                        analysis_type: "priority_fee".to_string(),
+                        details: AnalysisResultDetail::PriorityFee(PrioritizationFeeDetails {
+                            error_message: Some("Priority fee details not available or calculation skipped.".to_string()),
+                            ..Default::default()
+                        }),
+                        top_level_error_message: Some("Priority fee details not available or calculation skipped.".to_string()),
+                    });
+                }
             }
         }
 

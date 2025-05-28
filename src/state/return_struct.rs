@@ -13,6 +13,8 @@ pub struct RawSimulationResult {
     /// Human-readable result message for debugging/logs.
     /// Contains success details or base simulation error description.
     pub result: String,
+    /// Optional prioritization fee details.
+    pub prioritization_fee_details: Option<PrioritizationFeeDetails>,
 }
 
 impl RawSimulationResult {
@@ -25,6 +27,7 @@ impl RawSimulationResult {
                 "Base simulation executed successfully with {} compute units",
                 cu
             ),
+            prioritization_fee_details: None,
         }
     }
 
@@ -34,6 +37,7 @@ impl RawSimulationResult {
             success: false,
             cu: 0, // Or from simulation if available even on failure
             result: error.to_string(),
+            prioritization_fee_details: None,
         }
     }
 
@@ -43,6 +47,7 @@ impl RawSimulationResult {
             success: false,
             cu: 0,
             result: "No base simulation results returned".to_string(),
+            prioritization_fee_details: None,
         }
     }
 }
@@ -60,12 +65,24 @@ pub struct ComputeUnitsDetails {
     pub error_message: Option<String>, // Error specific to CU estimation, if any
 }
 
+/// Details related to prioritization fee estimation.
+#[derive(Debug, Clone, Default)]
+pub struct PrioritizationFeeDetails {
+    /// The fee per compute unit in micro-lamports.
+    pub fee_per_cu_micro_lamports: u64,
+    /// The total estimated fee in lamports.
+    pub total_fee_lamports: u64,
+    /// Optional error message specific to priority fee estimation.
+    pub error_message: Option<String>,
+}
+
 /// Enum for different types of analysis result details.
 #[derive(Debug, Clone)]
 pub enum AnalysisResultDetail {
     /// Detailed results of compute unit analysis.
     ComputeUnits(ComputeUnitsDetails),
-    // PriorityFee(PriorityFeeDetails),
+    /// Detailed results of priority fee analysis.
+    PriorityFee(PrioritizationFeeDetails),
     // Future analysis types can be added here
 }
 

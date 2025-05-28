@@ -39,7 +39,8 @@ fn cu() {
 
     let accounts = tx.message.account_keys.clone();
     let rollup_c = RollUpChannel::new(accounts, &rpc_client);
-    let results = rollup_c.simulate_transactions_raw(&[tx.clone()]);
+    let default_config = AnalysisConfig::default();
+    let results = rollup_c.simulate_transactions_raw(&[tx.clone()], &default_config);
 
     println!("Direct rollup results:");
     for (i, result) in results.iter().enumerate() {
@@ -86,7 +87,8 @@ fn test_failed_transaction() {
 
     let accounts = tx.message.account_keys.clone();
     let rollup_c = RollUpChannel::new(accounts, &rpc_client);
-    let results = rollup_c.simulate_transactions_raw(&[tx.clone()]);
+    let default_config_for_failure_test = AnalysisConfig::default();
+    let results = rollup_c.simulate_transactions_raw(&[tx.clone()], &default_config_for_failure_test);
 
     println!("Failed transaction test results:");
     for (i, result) in results.iter().enumerate() {
@@ -124,6 +126,121 @@ fn test_failed_transaction() {
 }
 
 #[test]
+fn test_prioritization_fee_simulation() {
+    let rpc_client = solana_client::rpc_client::RpcClient::new("https://api.devnet.solana.com");
+    let payer_bytes = [
+        177,  19, 110,  13,  66, 182, 187,  96,  61, 160,  89,  47,
+        228, 176, 216, 157,   7, 230, 253,  20,  89,  42,  62,  26,
+        171, 167, 112,  82,  61,  15,  28, 106,  68, 134,  51,  84,
+          2,  28,   7,  33, 163,  70, 209,  54, 137,  31,   1, 190,
+        138, 169,   2, 122, 137,  96,   9, 234, 165,  81, 218, 202,
+         46,   5,  96, 229,
+    ];
+    let payer = Keypair::from_bytes(&payer_bytes).unwrap_or_else(|e| {
+        panic!("Failed to create payer keypair from hardcoded bytes: {}. Ensure these bytes form a valid secret key.", e);
+    });
+    let recipient = Keypair::new().pubkey();
+
+    let recent_blockhash = rpc_client
+        .get_latest_blockhash()
+        .expect("Failed to get latest blockhash");
+
+    let lamports_for_rent_exemption = rpc_client
+        .get_minimum_balance_for_rent_exemption(0)
+        .expect("Failed to get minimum balance for rent exemption");
+
+    println!("Attempting to send {} lamports (rent-exempt minimum) to recipient.", lamports_for_rent_exemption);
+
+    let tx = create_transfer_tx(&payer, &recipient, lamports_for_rent_exemption, recent_blockhash);
+
+    let accounts_for_channel = tx.message.account_keys.clone();
+    let mut channel = RollUpChannel::new(accounts_for_channel, &rpc_client);
+
+    let config_with_fee = AnalysisConfig {
+        estimate_compute_units: true,
+        calculate_priority_fee: true,
+        tag: Some("test_fee_calc".to_string()),
+    };
+
+    println!("Processing tx with fee calculation, tag: {:?}", config_with_fee.tag);
+    let analysis_results = channel.process_transactions_with_analysis(&[tx.clone()], &config_with_fee);
+
+    assert_eq!(analysis_results.len(), 2, "Expected 2 analysis results (CU and Fee)");
+
+    let mut cu_result_found = false;
+    let mut fee_result_found = false;
+
+    for result in &analysis_results {
+        println!("Analysis Result Type: {}, Base Success: {}, Details: {:?}", result.analysis_type, result.base_simulation_success, result.details);
+        
+        if result.analysis_type == "compute_units" {
+            cu_result_found = true;
+            if let AnalysisResultDetail::ComputeUnits(cu_details) = &result.details {
+                println!("  CU Consumed: {}", cu_details.cu_consumed);
+            } else {
+                panic!("Expected ComputeUnits details for compute_units analysis type");
+            }
+        }
+
+        if result.analysis_type == "priority_fee" {
+            fee_result_found = true;
+            if let AnalysisResultDetail::PriorityFee(fee_details) = &result.details {
+                println!(
+                    "  Fee Details: Fee per CU: {}, Total Fee: {}, Error: {:?}",
+                    fee_details.fee_per_cu_micro_lamports,
+                    fee_details.total_fee_lamports,
+                    fee_details.error_message
+                );
+                
+                let raw_sim_cu_result = analysis_results.iter()
+                    .find(|r| r.analysis_type == "compute_units");
+                
+                let mut raw_sim_cu = 0;
+                let mut base_sim_actually_succeeded_for_cu_analysis = false;
+
+                if let Some(r_cu) = raw_sim_cu_result {
+                    base_sim_actually_succeeded_for_cu_analysis = r_cu.base_simulation_success;
+                    if let AnalysisResultDetail::ComputeUnits(details) = &r_cu.details {
+                        raw_sim_cu = details.cu_consumed;
+                    }
+                }
+
+                if base_sim_actually_succeeded_for_cu_analysis && raw_sim_cu > 0 {
+                     assert!(fee_details.error_message.is_none(), "Expected no error in fee details for successful simulation with CUs ({} CUs), but got: {:?}", raw_sim_cu, fee_details.error_message);
+                     
+                     // Calculate expected total fee based on details
+                     let expected_total_fee = (fee_details.fee_per_cu_micro_lamports as u128 * raw_sim_cu as u128) / 1_000_000;
+                     assert_eq!(fee_details.total_fee_lamports, expected_total_fee as u64, 
+                                "Total fee lamports ({}) does not match expected calculated fee ({}) based on fee_per_cu_micro_lamports ({}) and raw_sim_cu ({}).", 
+                                fee_details.total_fee_lamports, expected_total_fee, fee_details.fee_per_cu_micro_lamports, raw_sim_cu);
+
+                } else if fee_details.error_message.is_none() {
+
+                    assert_eq!(fee_details.total_fee_lamports, 0, "Expected zero total fee if base sim failed/no CUs ({}) and no specific fee error. Fee details: {:?}", raw_sim_cu, fee_details);
+                    assert_eq!(fee_details.fee_per_cu_micro_lamports, 0, "Expected zero fee per CU if base sim failed/no CUs ({}) and no specific fee error. Fee details: {:?}", raw_sim_cu, fee_details);
+                }
+
+            } else {
+                panic!("Expected PriorityFee details for priority_fee analysis type");
+            }
+        }
+    }
+
+    assert!(cu_result_found, "Compute units analysis result was not found.");
+    assert!(fee_result_found, "Priority fee analysis result was not found.");
+
+    let tagged_results = channel
+        .get_tagged_results(config_with_fee.tag.as_ref().unwrap())
+        .expect("Tag 'test_fee_calc' should exist");
+    assert_eq!(tagged_results.len(), 2, "Expected 2 stored analysis results for the tag");
+
+    let tagged_fee_result_exists = tagged_results.iter().any(|r| r.analysis_type == "priority_fee");
+    assert!(tagged_fee_result_exists, "Tagged results should contain priority fee analysis.");
+
+    println!("Prioritization fee simulation test completed.");
+}
+
+#[test]
 fn test_rollup_channel_tagging() {
     let rpc_client = solana_client::rpc_client::RpcClient::new("https://api.devnet.solana.com");
     let payer_bytes = [
@@ -150,18 +267,22 @@ fn test_rollup_channel_tagging() {
 
     let config_cu_only_tag1 = AnalysisConfig {
         estimate_compute_units: true,
+        calculate_priority_fee: false,
         tag: Some("run1_cu_only".to_string()),
     };
     let config_cu_only_tag2 = AnalysisConfig {
         estimate_compute_units: true,
+        calculate_priority_fee: false,
         tag: Some("run2_cu_only".to_string()),
     };
     let config_cu_only_tag_multi = AnalysisConfig {
         estimate_compute_units: true,
+        calculate_priority_fee: false,
         tag: Some("run_multi_cu_only".to_string()),
     };
     let config_cu_only_no_tag = AnalysisConfig {
         estimate_compute_units: true,
+        calculate_priority_fee: false,
         tag: None,
     };
 

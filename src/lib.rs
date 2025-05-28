@@ -214,11 +214,12 @@ pub mod state;
 mod utils;
 use crate::state::fork_rollup_graph::ForkRollUpGraph;
 use anyhow::Result;
-use async_trait::async_trait;
 use solana_client::nonblocking::rpc_client::RpcClient;
-pub use crate::state::{
-    return_struct::{AnalysisResultDetail, ComputeUnitsDetails, RawSimulationResult, SimulationAnalysisResult},
-    rollup_channel::RollUpChannel,
+use solana_client::rpc_response::RpcPrioritizationFee;
+pub use state::rollup_channel::RollUpChannel;
+pub use crate::state::return_struct::{
+    AnalysisResultDetail, ComputeUnitsDetails, RawSimulationResult, SimulationAnalysisResult,
+    PrioritizationFeeDetails,
 };
 
 /// Configuration for transaction simulation analyses.
@@ -226,83 +227,43 @@ pub use crate::state::{
 pub struct AnalysisConfig {
     /// If `true`, estimate compute units.
     pub estimate_compute_units: bool,
-    // pub calculate_priority_fee: bool,
+    /// If `true`, calculate and include prioritization fee details.
+    pub calculate_priority_fee: bool,
     /// If `Some(tag_string)`, stores analysis results under this tag.
     pub tag: Option<String>,
 }
 
 /// Wraps `RpcClient` to provide stateful, tagged analysis results.
+#[derive(Debug, Default)]
 pub struct TaggedAnalysisClient {
-    rpc_client: solana_client::rpc_client::RpcClient,
-    tagged_results_store: HashMap<String, Vec<SimulationAnalysisResult>>,
+    // Using a HashMap to store tagged results for quick lookups.
+    // The key is the tag (String), and the value is the SimulationAnalysisResult.
+    tagged_results_store: HashMap<String, SimulationAnalysisResult>,
 }
 
 impl TaggedAnalysisClient {
-    /// Creates a new `TaggedAnalysisClient`.
-    pub fn new(rpc_url: String) -> Self {
-        Self {
-            rpc_client: solana_client::rpc_client::RpcClient::new(rpc_url),
-            tagged_results_store: HashMap::new(),
-        }
+    pub fn new() -> Self {
+        Self { tagged_results_store: HashMap::new() }
     }
 
-    /// Performs and optionally tags analyses on a batch of transactions.
-    pub fn analyze_transactions(
-        &mut self,
-        transactions: &[Transaction],
-        config: &AnalysisConfig,
-    ) -> Result<Vec<SimulationAnalysisResult>, Box<dyn std::error::Error + 'static>> {
-        // Note: RollUpChannel::new expects Vec<Pubkey> for all potentially accessed accounts.
-        // For simplicity here, we'll just collect from the first transaction if transactions is not empty.
-
-        let mut all_accounts: Vec<Pubkey> = Vec::new();
-        for tx in transactions {
-            all_accounts.extend(tx.message.account_keys.iter().cloned());
-        }
-        all_accounts.sort();
-        all_accounts.dedup();
-
-        let mut channel = RollUpChannel::new(all_accounts, &self.rpc_client);
-
-        let analysis_results = channel.process_transactions_with_analysis(transactions, config);
-
-        if let Some(tag_str) = &config.tag {
-            if !analysis_results.is_empty() {
-                self.tagged_results_store
-                    .entry(tag_str.clone())
-                    .or_default()
-                    .extend(analysis_results.clone()); // Store a clone here
-            }
-        }
-
-        // Determine if an error should be returned based on results.
-        // For example, if all results indicate base_simulation_success == false.
-        let all_failed = !analysis_results.is_empty()
-            && analysis_results.iter().all(|r| !r.base_simulation_success);
-        if all_failed {
-            let error_messages = analysis_results
-                .iter()
-                .map(|r| {
-                    r.top_level_error_message
-                        .clone()
-                        .unwrap_or_else(|| "Unknown simulation error".to_string())
-                })
-                .collect::<Vec<String>>()
-                .join("; ");
-            return Err(Box::new(SolanaClientExtError::ComputeUnitsError(format!(
-                "All transaction simulations failed: {}",
-                error_messages
-            ))));
-        }
-
-        Ok(analysis_results)
+    pub fn add_tagged_result(&mut self, tag: String, result: SimulationAnalysisResult) {
+        self.tagged_results_store.insert(tag, result);
     }
 
-    /// Retrieves detailed `SimulationAnalysisResult`s for a given tag.
-    pub fn get_tagged_analysis_results(&self, tag: &str) -> Option<&Vec<SimulationAnalysisResult>> {
+    pub fn get_tagged_result(&self, tag: &str) -> Option<&SimulationAnalysisResult> {
         self.tagged_results_store.get(tag)
     }
 }
+
+/// Represents the details of an estimated prioritization fee.
+#[derive(Debug, Clone, Default)]
+pub struct EstimatedPrioritizationFee {
+    /// The fee per compute unit in micro-lamports.
+    pub fee_per_cu_micro_lamports: u64,
+    /// The total estimated fee in lamports.
+    pub total_fee_lamports: u64,
+}
+
 #[async_trait::async_trait]
 pub trait RpcClientExtAsync {
     /// Estimates the total prioritization fee in lamports for the given CU.
@@ -312,7 +273,7 @@ pub trait RpcClientExtAsync {
         &self,
         accounts: Option<&[Pubkey]>,
         cu: u64,
-    ) -> Result<u64>; // Total fee in lamports
+    ) -> Result<EstimatedPrioritizationFee>;
 }
 
 pub trait RpcClientExt {
@@ -357,6 +318,13 @@ pub trait RpcClientExt {
         message: &mut Message,
         signers: &'a I,
     ) -> Result<u32, Box<dyn std::error::Error + 'static>>;
+
+    /// Estimates the total prioritization fee for the given CU (synchronous).
+    fn estimate_priority_fee_for_cu_sync(
+        &self,
+        accounts: Option<&[Pubkey]>,
+        cu: u64,
+    ) -> Result<EstimatedPrioritizationFee>;
 }
 
 #[async_trait::async_trait]
@@ -367,9 +335,9 @@ impl RpcClientExtAsync for RpcClient {
         &self,
         accounts: Option<&[Pubkey]>, // Optional list of accounts to base the fee estimation on
         cu: u64,                     // Target compute unit budget for which to estimate fees
-    ) -> Result<u64> {
+    ) -> Result<EstimatedPrioritizationFee> {
         // Fetch recent prioritization fees using provided accounts or empty list if None
-        let fees = match accounts {
+        let fees: Vec<RpcPrioritizationFee> = match accounts {
             Some(addrs) => self.get_recent_prioritization_fees(addrs).await?,
             None => self.get_recent_prioritization_fees(&[]).await?,
         };
@@ -382,7 +350,10 @@ impl RpcClientExtAsync for RpcClient {
         let total_lamports = (best_fee_per_cu_micro as u128 * cu as u128) / 1_000_000;
 
         // Return the total estimated fee in lamports
-        Ok(total_lamports as u64)
+        Ok(EstimatedPrioritizationFee {
+            fee_per_cu_micro_lamports: best_fee_per_cu_micro,
+            total_fee_lamports: total_lamports as u64,
+        })
     }
 }
 
@@ -394,7 +365,11 @@ impl RpcClientExt for solana_client::rpc_client::RpcClient {
     ) -> Result<Vec<u64>, Box<dyn std::error::Error + 'static>> {
         let accounts: Vec<Pubkey> = transaction.message.account_keys.clone();
         let channel = RollUpChannel::new(accounts, self);
-        let raw_results = channel.simulate_transactions_raw(&[transaction.clone()]);
+        let raw_results = channel.simulate_transactions_raw(&[transaction.clone()], &AnalysisConfig {
+            estimate_compute_units: true,
+            calculate_priority_fee: false,
+            tag: None,
+        });
 
         let mut cus = Vec::new();
         let mut error_messages = Vec::new();
@@ -481,5 +456,24 @@ impl RpcClientExt for solana_client::rpc_client::RpcClient {
         let compiled_ix = message.compile_instruction(&optimize_ix);
         message.instructions.insert(0, compiled_ix);
         Ok(optimal_cu)
+    }
+
+    fn estimate_priority_fee_for_cu_sync(
+        &self,
+        accounts: Option<&[Pubkey]>,
+        cu: u64,
+    ) -> Result<EstimatedPrioritizationFee> {
+        let fees = match accounts {
+            Some(addrs) => self.get_recent_prioritization_fees(addrs)?,
+            None => self.get_recent_prioritization_fees(&[])?,
+        };
+
+        let best_fee_per_cu_micro = fees.iter().map(|f| f.prioritization_fee).max().unwrap_or(0);
+        let total_lamports = (best_fee_per_cu_micro as u128 * cu as u128) / 1_000_000;
+
+        Ok(EstimatedPrioritizationFee {
+            fee_per_cu_micro_lamports: best_fee_per_cu_micro,
+            total_fee_lamports: total_lamports as u64,
+        })
     }
 }
